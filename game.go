@@ -1,3 +1,12 @@
+// Package pacman implements the classic Pacman game, with a
+// procedurally generated, infinite vertical maze.
+//
+// How to play:
+// Use direction keys to move pacman. Ghosts try to chase player and
+// on collision player looses a life. Player starts with 5 lives and
+// can have upto 7. Collect diamond to increase lives. Use flask to
+// gain ability to destroy ghosts, ability lasts for 10 seconds & ghosts
+// try to runaway from player. Eating a ghost gives bonus of 200 points.
 package pacman
 
 import (
@@ -6,6 +15,7 @@ import (
 	"time"
 
 	"github.com/hajimehoshi/ebiten"
+	"github.com/skatiyar/pacman/assets"
 )
 
 type gameState int
@@ -19,6 +29,8 @@ type Game struct {
 	gridView    func(gameState, *Data) (*ebiten.Image, error)
 	direction   direction
 	powerTicker *time.Ticker
+
+	audio *Audio
 }
 
 const (
@@ -31,44 +43,30 @@ const (
 )
 
 func NewGame() (*Game, error) {
-	skin, skinErr := LoadSkin()
-	if skinErr != nil {
-		return nil, skinErr
+	lAssets, assetsErr := assets.LoadAssets()
+	if assetsErr != nil {
+		return nil, assetsErr
 	}
 
-	font, fontErr := LoadArcadeFont()
-	if fontErr != nil {
-		return nil, fontErr
-	}
-
-	characters, charactersErr := LoadCharacters()
-	if charactersErr != nil {
-		return nil, charactersErr
-	}
-
-	powers, powersErr := LoadPowers()
-	if powersErr != nil {
-		return nil, powersErr
-	}
-
-	walls, wallsErr := LoadWalls()
-	if wallsErr != nil {
-		return nil, wallsErr
-	}
-
-	mazeView, mazeViewErr := MazeView(walls)
+	mazeView, mazeViewErr := MazeView(lAssets.Walls)
 	if mazeViewErr != nil {
 		return nil, mazeViewErr
 	}
 
-	gridView, gridViewErr := GridView(characters, powers, font, mazeView)
+	gridView, gridViewErr := GridView(lAssets.Characters, lAssets.Powers,
+		lAssets.ArcadeFont, mazeView)
 	if gridViewErr != nil {
 		return nil, gridViewErr
 	}
 
-	skinView, skinViewErr := SkinView(skin, powers, font)
+	skinView, skinViewErr := SkinView(lAssets.Skin, lAssets.Powers, lAssets.ArcadeFont)
 	if skinViewErr != nil {
 		return nil, skinViewErr
+	}
+
+	audio, audioErr := NewAudio()
+	if audioErr != nil {
+		return nil, audioErr
 	}
 
 	return &Game{
@@ -76,10 +74,11 @@ func NewGame() (*Game, error) {
 		state:    GameLoading,
 		skinView: skinView,
 		gridView: gridView,
+		audio:    audio,
 	}, nil
 }
 
-func (g *Game) Update(screen *ebiten.Image) error {
+func (g *Game) update(screen *ebiten.Image) error {
 	switch g.state {
 	case GameLoading:
 		if spaceReleased() {
@@ -113,7 +112,10 @@ func (g *Game) Update(screen *ebiten.Image) error {
 
 			ghosts := make([]Ghost, 0)
 			for i := 0; i < MazeViewSize/CellSize; i += 2 {
-				cellX := g.rand.Intn(Columns)
+				cellX := g.rand.Intn(Columns/2) + Columns/2
+				if i%4 == 0 {
+					cellX = g.rand.Intn(Columns / 2)
+				}
 				cellY := g.rand.Intn(2) + i
 				kind := Ghost1
 				if (cellY-i)%4 == 0 {
@@ -123,15 +125,20 @@ func (g *Game) Update(screen *ebiten.Image) error {
 				} else if (cellY-i)%2 == 0 {
 					kind = Ghost2
 				}
-				ghosts = append(ghosts,
-					NewGhost(cellX, cellY, kind, getExit(g.data.grid[cellY][cellX].walls)))
+				ghosts = append(ghosts, NewGhost(cellX, cellY, kind, getExit(
+					g.data.grid[cellY][cellX].walls)))
 			}
 			g.data.ghosts = ghosts
+
+			g.audio.players.Beginning.Pause()
+			g.audio.players.Beginning.Rewind()
 
 			g.state = GameStart
 		} else {
 			g.data = nil
 			g.maze = nil
+
+			g.audio.players.Beginning.Play()
 		}
 	case GameStart:
 		if spaceReleased() {
@@ -192,13 +199,21 @@ func (g *Game) Update(screen *ebiten.Image) error {
 						if g.data.lifes < MaxLifes {
 							g.data.lifes += 1
 							g.data.powers[i] = NewPower(cellX, cellY, g.data.powers[i].kind)
+							if !g.audio.players.ExtraPac.IsPlaying() {
+								g.audio.players.ExtraPac.Rewind()
+								g.audio.players.ExtraPac.Play()
+							}
 						}
 					case Invincibility:
 						if !g.data.invincible {
 							g.data.invincible = true
 						}
-						g.startCountdown(15)
+						g.startCountdown(10)
 						g.data.powers[i] = NewPower(cellX, cellY, g.data.powers[i].kind)
+						if !g.audio.players.EatFlask.IsPlaying() {
+							g.audio.players.EatFlask.Rewind()
+							g.audio.players.EatFlask.Play()
+						}
 					}
 				}
 			}
@@ -209,6 +224,10 @@ func (g *Game) Update(screen *ebiten.Image) error {
 						g.data.lifes -= 1
 					} else {
 						g.data.score += 200
+						if !g.audio.players.EatGhost.IsPlaying() {
+							g.audio.players.EatGhost.Rewind()
+							g.audio.players.EatGhost.Play()
+						}
 					}
 					cellX := g.rand.Intn(Columns)
 					cellY := g.rand.Intn(4) +
@@ -226,6 +245,11 @@ func (g *Game) Update(screen *ebiten.Image) error {
 	case GameOver:
 		if spaceReleased() {
 			g.state = GameLoading
+
+			g.audio.players.Death.Pause()
+			g.audio.players.Death.Rewind()
+		} else {
+			g.audio.players.Death.Play()
 		}
 	default:
 		// reset state to GameLoading
@@ -264,8 +288,8 @@ func (g *Game) Update(screen *ebiten.Image) error {
 
 func (g *Game) Run() error {
 	return ebiten.Run(func(screen *ebiten.Image) error {
-		return g.Update(screen)
-	}, 712, 1220, 0.5, "PACMAN")
+		return g.update(screen)
+	}, 712, 1220, 0.5, "PACMAN") // scale is kept to 0.5, for good rendering in retina.
 }
 
 func (g *Game) keybord() {
@@ -424,71 +448,37 @@ func (g *Game) getGhostDirection(i int) direction {
 		prevDist = 0.0
 	}
 
-	for j := 0; j < 4; j++ {
+	for j := range g.rand.Perm(4) {
 		if g.data.grid[ghost.cellY][ghost.cellX].walls[j] == '_' {
+			nx, ny := 0, 0
+			dist := 0.0
 			switch j {
 			case 0: // North
 				// Added to prevent array overflow panic,
 				// since last row in grid might have open North wall
 				if y+1 < MazeViewSize/CellSize {
-					dist := math.Sqrt(math.Pow(ghsX-pacX, 2) + math.Pow((ghsY+CellSize)-pacY, 2))
-					nx, ny := ghost.cellX, ghost.cellY+1
-					if g.directionOfCell(ghost.cellX, ghost.cellY, nx, ny) !=
-						getOppositeDirection(ghost.direction) {
-						if g.data.invincible {
-							if dist > prevDist {
-								x, y, prevDist = nx, ny, dist
-							}
-						} else {
-							if dist < prevDist {
-								x, y, prevDist = nx, ny, dist
-							}
-						}
-					}
+					dist = math.Sqrt(math.Pow(ghsX-pacX, 2) + math.Pow((ghsY+CellSize)-pacY, 2))
+					nx, ny = ghost.cellX, ghost.cellY+1
 				}
 			case 1: // East
-				dist := math.Sqrt(math.Pow((ghsX+CellSize)-pacX, 2) + math.Pow(ghsY-pacY, 2))
-				nx, ny := ghost.cellX+1, ghost.cellY
-				if g.directionOfCell(ghost.cellX, ghost.cellY, nx, ny) !=
-					getOppositeDirection(ghost.direction) {
-					if g.data.invincible {
-						if dist > prevDist {
-							x, y, prevDist = nx, ny, dist
-						}
-					} else {
-						if dist < prevDist {
-							x, y, prevDist = nx, ny, dist
-						}
-					}
-				}
+				dist = math.Sqrt(math.Pow((ghsX+CellSize)-pacX, 2) + math.Pow(ghsY-pacY, 2))
+				nx, ny = ghost.cellX+1, ghost.cellY
 			case 2: // South
-				dist := math.Sqrt(math.Pow(ghsX-pacX, 2) + math.Pow((ghsY-CellSize)-pacY, 2))
-				nx, ny := ghost.cellX, ghost.cellY-1
-				if g.directionOfCell(ghost.cellX, ghost.cellY, nx, ny) !=
-					getOppositeDirection(ghost.direction) {
-					if g.data.invincible {
-						if dist > prevDist {
-							x, y, prevDist = nx, ny, dist
-						}
-					} else {
-						if dist < prevDist {
-							x, y, prevDist = nx, ny, dist
-						}
-					}
-				}
+				dist = math.Sqrt(math.Pow(ghsX-pacX, 2) + math.Pow((ghsY-CellSize)-pacY, 2))
+				nx, ny = ghost.cellX, ghost.cellY-1
 			case 3: // West
-				dist := math.Sqrt(math.Pow((ghsX-CellSize)-pacX, 2) + math.Pow(ghsY-pacY, 2))
-				nx, ny := ghost.cellX-1, ghost.cellY
-				if g.directionOfCell(ghost.cellX, ghost.cellY, nx, ny) !=
-					getOppositeDirection(ghost.direction) {
-					if g.data.invincible {
-						if dist > prevDist {
-							x, y, prevDist = nx, ny, dist
-						}
-					} else {
-						if dist < prevDist {
-							x, y, prevDist = nx, ny, dist
-						}
+				dist = math.Sqrt(math.Pow((ghsX-CellSize)-pacX, 2) + math.Pow(ghsY-pacY, 2))
+				nx, ny = ghost.cellX-1, ghost.cellY
+			}
+			if g.directionOfCell(ghost.cellX, ghost.cellY, nx, ny) !=
+				getOppositeDirection(ghost.direction) {
+				if g.data.invincible {
+					if dist > prevDist {
+						x, y, prevDist = nx, ny, dist
+					}
+				} else {
+					if dist < prevDist {
+						x, y, prevDist = nx, ny, dist
 					}
 				}
 			}
@@ -623,9 +613,8 @@ func (g *Game) directionOfCell(cx, cy, nx, ny int) direction {
 
 	if cx%2 == 0 {
 		return West
-	} else {
-		return East
 	}
+	return East
 }
 
 func getOppositeDirection(dir direction) direction {
